@@ -4,6 +4,9 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3.5:9b"
 
+# История диалога. Создаётся ОДИН раз, до цикла, и растёт с каждым вопросом
+messages = []
+
 print(f"Бот на модели {MODEL}. Для выхода напиши exit.")
 
 while True:
@@ -20,7 +23,10 @@ while True:
     if not question:
         continue
 
-    # 4. Собираем тело запроса — тот же JSON, что ты отправлял через curl
+    # 4. Добавляем вопрос в историю
+    messages.append({"role": "user", "content": question})
+
+    # 5. Собираем тело запроса — тот же JSON, что ты отправлял через curl
     payload = {
         "model": MODEL,
         "messages": [
@@ -29,12 +35,13 @@ while True:
         "stream": False,
     }
 
-    # 3. Отправляем POST-запрос и ждём ответ
+    # 6. Отправляем POST-запрос и ждём ответ
     response = requests.post(OLLAMA_URL, json=payload, timeout=300)
     response.raise_for_status()
 
-    # 4. Разбираем JSON и достаём текст ответа
+    # 7. Достаём ответ и тоже кладём его в историю
     data = response.json()
     answer = data["message"]["content"]
+    messages.append({"role": "assistant", "content": answer})
 
     print("Ответ:", answer)
