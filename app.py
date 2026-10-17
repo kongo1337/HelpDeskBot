@@ -3,6 +3,7 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # Настройки — те же, что в bot.py
@@ -13,6 +14,9 @@ TIMEOUT = 300
 # Системный промпт из того же файла, что и у bot.py
 PROMPT_FILE = Path(__file__).parent / "prompts" / "system.md"
 SYSTEM_PROMPT = PROMPT_FILE.read_text(encoding="utf-8")
+
+# Страница чата
+INDEX_FILE = Path(__file__).parent / "static" / "index.html"
 
 # Все разговоры: session_id -> список сообщений (без системного промпта).
 # Живёт в оперативной памяти, поэтому пропадает при перезапуске сервера
@@ -31,6 +35,12 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     session_id: str  # всегда возвращаем, чтобы клиент знал, куда писать дальше
+
+
+# GET / — отдаём страницу чата
+@app.get("/", include_in_schema=False)
+def index():
+    return FileResponse(INDEX_FILE)
 
 
 # GET /health — проверка, что приложение живо
