@@ -29,9 +29,7 @@ while True:
     # 5. Собираем тело запроса — тот же JSON, что ты отправлял через curl
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "user", "content": question},
-        ],
+        "messages": messages,
         "stream": False,
     }
 
