@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helpdesk-бот</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --text: #1f2328;
+      --muted: #6b7280;
+      --user: #2563eb;
+      --user-text: #ffffff;
+      --bot: #e9ecf1;
+      --error: #fde8e8;
+      --error-text: #9b1c1c;
+      --border: #d0d5dd;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #16181d;
+        --panel: #1f2229;
+        --text: #e6e8eb;
+        --muted: #9aa1ab;
+        --user: #3b6fe0;
+        --bot: #2b2f38;
+        --error: #3a1d1d;
+        --error-text: #f5a5a5;
+        --border: #3a3f4a;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app {
+      max-width: 760px;
+      height: 100vh;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { font-size: 18px; margin: 0; }
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap; /* сохраняем переносы строк из ответа модели */
+    }
+    .user { align-self: flex-end; background: var(--user); color: var(--user-text); }
+    .assistant { align-self: flex-start; background: var(--bot); }
+    .typing { color: var(--muted); font-style: italic; }
+    .error { align-self: flex-start; background: var(--error); color: var(--error-text); }
+    form {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+    }
+    input {
+      flex: 1;
+      padding: 10px 12px;
+      font-size: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+    }
+    button {
+      padding: 10px 16px;
+      font-size: 15px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button.primary { background: var(--user); color: var(--user-text); border-color: var(--user); }
+    button:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Helpdesk-бот</h1>
+      <button id="new" type="button">Новый разговор</button>
+    </header>
+
+    <div id="chat"></div>
+
+    <form id="form">
+      <input id="input" placeholder="Опиши проблему…" autocomplete="off" autofocus>
+      <button id="send" class="primary" type="submit">Отправить</button>
+    </form>
+  </div>
+
+  <script>
+    // Находим элементы страницы по их id
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const newBtn = document.getElementById("new");
+
+    // Номер разговора храним в браузере, чтобы он пережил перезагрузку страницы
+    let sessionId = localStorage.getItem("sessionId");
+
+    // Добавить сообщение в окно чата. textContent, а не innerHTML — текст не превратится в HTML
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = "msg " + role;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight; // прокрутка вниз
+      return div;
+    }
+
+    // Показать ошибку от сервера. У 422 detail — список, у наших ошибок — строка
+    function errorText(data) {
+      return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    }
+
+    // При открытии страницы подгружаем историю, если разговор уже был
+    async function loadHistory() {
+      if (!sessionId) return;
+      const response = await fetch(`/sessions/${sessionId}`);
+      if (!response.ok) {
+        // Сервер этот разговор не знает (например, его перезапустили) — начинаем заново
+        sessionId = null;
+        localStorage.removeItem("sessionId");
+        return;
+      }
+      const data = await response.json();
+      for (const message of data.messages) {
+        addMessage(message.role, message.content);
+      }
+    }
+
+    // Отправка вопроса: срабатывает и по кнопке, и по Enter
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault(); // не перезагружать страницу, как делает форма по умолчанию
+
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage("user", text);
+      input.value = "";
+      sendBtn.disabled = true;
+      const reply = addMessage("assistant typing", "Бот печатает…");
+
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, session_id: sessionId }),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          reply.className = "msg error";
+          reply.textContent = "Ошибка: " + errorText(data);
+          return;
+        }
+
+        sessionId = data.session_id;
+        localStorage.setItem("sessionId", sessionId);
+        reply.className = "msg assistant";
+        reply.textContent = data.answer;
+      } catch (err) {
+        // Сюда попадаем, если сервер вообще не ответил
+        reply.className = "msg error";
+        reply.textContent = "Не удалось связаться с сервером: " + err.message;
+      } finally {
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    });
+
+    // Новый разговор: забываем номер и очищаем окно
+    newBtn.addEventListener("click", () => {
+      sessionId = null;
+      localStorage.removeItem("sessionId");
+      chat.innerHTML = "";
+      input.focus();
+    });
+
+    loadHistory();
+  </script>
+</body>
+</html>
