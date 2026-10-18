@@ -170,23 +170,60 @@
       const reply = addMessage("assistant typing", "Бот печатает…");
 
       try {
-        const response = await fetch("/chat", {
+        const response = await fetch("/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text, session_id: sessionId }),
         });
-        const data = await response.json();
 
+        // Ошибка до начала ответа (503, 422...) приходит обычным JSON
         if (!response.ok) {
+          const data = await response.json();
           reply.className = "msg error";
           reply.textContent = "Ошибка: " + errorText(data);
           return;
         }
 
-        sessionId = data.session_id;
-        localStorage.setItem("sessionId", sessionId);
-        reply.className = "msg assistant";
-        reply.textContent = data.answer;
+        // Читаем поток: каждая строка — отдельный JSON-объект (NDJSON)
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";   // сюда копим байты, пока не придёт целая строка
+        let started = false;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // Кусок из сети может оборваться посреди строки,
+          // поэтому разбираем только целые строки, а хвост оставляем в буфере
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line) continue;
+            const ev = JSON.parse(line);
+
+            if (ev.type === "session") {
+              sessionId = ev.session_id;
+            } else if (ev.type === "token") {
+              if (!started) {
+                // Первый кусочек: убираем «Бот печатает…»
+                reply.className = "msg assistant";
+                reply.textContent = "";
+                started = true;
+              }
+              reply.textContent += ev.content;
+              chat.scrollTop = chat.scrollHeight;
+            } else if (ev.type === "done") {
+              // Ответ сохранён на сервере — запоминаем разговор в браузере
+              localStorage.setItem("sessionId", sessionId);
+            } else if (ev.type === "error") {
+              reply.className = "msg error";
+              reply.textContent = "Ошибка: " + ev.detail;
+            }
+          }
+        }
       } catch (err) {
         // Сюда попадаем, если сервер вообще не ответил
         reply.className = "msg error";

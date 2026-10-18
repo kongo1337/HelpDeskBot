@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -5,7 +6,7 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 # Настройки — те же, что в bot.py
@@ -78,15 +79,18 @@ def load_history(conn, session_id):
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
 
-def save_exchange(conn, session_id, question, answer):
-    """Сохранить вопрос и ответ одной парой."""
-    conn.executemany(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        [
-            (session_id, "user", question),
-            (session_id, "assistant", answer),
-        ],
-    )
+def save_exchange(session_id, is_new, question, answer):
+    """Сохранить вопрос и ответ одной парой. Новый разговор создаётся здесь же."""
+    with db() as conn:
+        if is_new:
+            conn.execute("INSERT INTO sessions (id) VALUES (?)", (session_id,))
+        conn.executemany(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+            [
+                (session_id, "user", question),
+                (session_id, "assistant", answer),
+            ],
+        )
 
 
 init_db()
@@ -107,6 +111,54 @@ class ChatResponse(BaseModel):
     session_id: str  # всегда возвращаем, чтобы клиент знал, куда писать дальше
 
 
+# ---------- Общая логика для /chat и /chat/stream ----------
+
+def prepare(request: ChatRequest):
+    """Найти разговор и собрать список сообщений для модели.
+
+    Возвращает (session_id, is_new, messages).
+    Неизвестный session_id не принимаем — начинаем новый разговор.
+    """
+    history = []
+    is_new = True
+    session_id = str(uuid.uuid4())
+
+    if request.session_id:
+        with db() as conn:
+            if session_exists(conn, request.session_id):
+                session_id = request.session_id
+                is_new = False
+                history = load_history(conn, session_id)
+
+    messages = (
+        [{"role": "system", "content": SYSTEM_PROMPT}]
+        + history
+        + [{"role": "user", "content": request.message}]
+    )
+    return session_id, is_new, messages
+
+
+def call_ollama(messages, stream):
+    """Отправить запрос в Ollama. Ошибки превращаем в понятные HTTP-ответы."""
+    payload = {"model": MODEL, "messages": messages, "stream": stream}
+    try:
+        # stream=True у requests: не читать ответ целиком, а отдавать по мере прихода
+        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT, stream=stream)
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="Ollama недоступна. Проверь: systemctl status ollama")
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail=f"Модель не ответила за {TIMEOUT} секунд")
+    except requests.exceptions.HTTPError:
+        raise HTTPException(status_code=502, detail=f"Ошибка от Ollama: {response.text}")
+    return response
+
+
+def event(data: dict) -> str:
+    """Одна строка NDJSON: JSON-объект и перевод строки."""
+    return json.dumps(data, ensure_ascii=False) + "\n"
+
+
 # ---------- Эндпоинты ----------
 
 # GET / — отдаём страницу чата
@@ -121,49 +173,59 @@ def health():
     return {"status": "ok"}
 
 
-# POST /chat — вопрос пользователя -> ответ модели с учётом истории разговора
+# POST /chat — ответ целиком одним JSON. Удобно для curl
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    # 1. Ищем разговор в базе. Неизвестный session_id не принимаем — начнём новый
-    session_id = None
-    history = []
-    if request.session_id:
-        with db() as conn:
-            if session_exists(conn, request.session_id):
-                session_id = request.session_id
-                history = load_history(conn, session_id)
-
-    # 2. Собираем запрос: системный промпт + история + новый вопрос
-    user_message = {"role": "user", "content": request.message}
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [user_message]
-
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "stream": False,
-    }
-
-    # 3. Идём в Ollama. База в это время закрыта: ответ может идти минуту
-    try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT)
-        response.raise_for_status()
-    except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=503, detail="Ollama недоступна. Проверь: systemctl status ollama")
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail=f"Модель не ответила за {TIMEOUT} секунд")
-    except requests.exceptions.HTTPError:
-        raise HTTPException(status_code=502, detail=f"Ошибка от Ollama: {response.text}")
-
+    session_id, is_new, messages = prepare(request)
+    response = call_ollama(messages, stream=False)
     answer = response.json()["message"]["content"]
-
-    # 4. Ответ получен — только теперь пишем в базу
-    with db() as conn:
-        if session_id is None:
-            session_id = str(uuid.uuid4())
-            conn.execute("INSERT INTO sessions (id) VALUES (?)", (session_id,))
-        save_exchange(conn, session_id, request.message, answer)
-
+    save_exchange(session_id, is_new, request.message, answer)
     return ChatResponse(answer=answer, session_id=session_id)
+
+
+# POST /chat/stream — ответ по кусочкам, по мере генерации
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    session_id, is_new, messages = prepare(request)
+
+    # Подключаемся к Ollama ДО начала ответа клиенту:
+    # если она лежит, клиент получит нормальную ошибку 503, как в /chat
+    response = call_ollama(messages, stream=True)
+
+    def generate():
+        parts = []  # сюда собираем кусочки, чтобы потом сохранить ответ целиком
+        try:
+            yield event({"type": "session", "session_id": session_id})
+
+            # Ollama присылает по строке JSON на каждый кусочек текста
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+
+                if "error" in chunk:
+                    yield event({"type": "error", "detail": chunk["error"]})
+                    return
+
+                text = chunk.get("message", {}).get("content", "")
+                if text:
+                    parts.append(text)
+                    yield event({"type": "token", "content": text})
+
+                if chunk.get("done"):
+                    break
+
+            # Ответ пришёл полностью — только теперь пишем в базу
+            save_exchange(session_id, is_new, request.message, "".join(parts))
+            yield event({"type": "done"})
+
+        except requests.exceptions.RequestException:
+            # Связь с Ollama оборвалась посреди ответа. В базу ничего не пишем
+            yield event({"type": "error", "detail": "Связь с Ollama оборвалась во время ответа"})
+        finally:
+            response.close()
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # GET /sessions/{session_id} — посмотреть историю разговора
