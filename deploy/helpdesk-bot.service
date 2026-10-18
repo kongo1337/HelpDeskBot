@@ -1,0 +1,35 @@
+[Unit]
+Description=Helpdesk bot (FastAPI + Ollama)
+# Запускаться после сети и Ollama. Wants — «желательно, чтобы Ollama тоже была запущена»
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+# От чьего имени работает приложение. Не root!
+User=constantine
+Group=constantine
+
+# Папка, из которой запускается uvicorn — там лежит app.py и создаётся helpdesk.db
+WorkingDirectory=/home/constantine/projects/helpdesk-bot
+
+# uvicorn из venv проекта. Путь полный: systemd ничего не знает про source .venv/bin/activate
+# Без --reload: это «боевой» запуск, а не разработка
+ExecStart=/home/constantine/projects/helpdesk-bot/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+
+# Упал — поднять заново через 5 секунд
+Restart=on-failure
+RestartSec=5
+
+# Писать логи сразу, без буфера, чтобы они вовремя попадали в journalctl
+Environment=PYTHONUNBUFFERED=1
+
+# Немного защиты: процесс не может повысить себе права,
+# системные папки (/usr, /boot, /etc) для него только на чтение, свой отдельный /tmp
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+# Включать при обычной загрузке системы
+WantedBy=multi-user.target
