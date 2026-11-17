@@ -1,10 +1,14 @@
 import sys
+import os
 from pathlib import Path
 
 import requests
 
 # Адрес локальной Ollama. Именно http, не https — грабли от 16.10
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://localhost:11434/api/chat"
+)
 MODEL = "qwen3.5:9b"
 TIMEOUT = 300  # сколько секунд ждать ответа модели
 

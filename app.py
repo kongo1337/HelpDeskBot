@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import uuid
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -10,7 +11,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 # Настройки — те же, что в bot.py
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://localhost:11434/api/chat"
+)
 MODEL = "qwen3.5:9b"
 TIMEOUT = 300
 
