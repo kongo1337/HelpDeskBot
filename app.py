@@ -27,8 +27,10 @@ SYSTEM_PROMPT = PROMPT_FILE.read_text(encoding="utf-8")
 # Страница чата
 INDEX_FILE = BASE_DIR / "static" / "index.html"
 
-# Файл базы данных. Создастся сам при первом запуске
-DB_FILE = BASE_DIR / "helpdesk.db"
+# Файл базы данных. 
+DB_FILE = Path(
+    os.getenv("DB_PATH", str(BASE_DIR / "helpdesk.db"))
+)
 
 
 # ---------- База данных ----------
