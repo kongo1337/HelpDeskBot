@@ -146,17 +146,30 @@ def prepare(request: ChatRequest):
 
 def call_ollama(messages, stream):
     """Отправить запрос в Ollama. Ошибки превращаем в понятные HTTP-ответы."""
-    payload = {"model": MODEL, "messages": messages, "stream": stream}
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "stream": stream
+    }
+
+    if os.getenv("OLLAMA_THINK", "").lower() == "false":
+        payload["think"] = False
+
     try:
-        # stream=True у requests: не читать ответ целиком, а отдавать по мере прихода
-        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT, stream=stream)
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=TIMEOUT,
+            stream=stream
+        )
         response.raise_for_status()
     except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=503, detail="Ollama недоступна. Проверь: systemctl status ollama")
+        raise HTTPException(status_code=503, detail="Ollama недоступна")
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail=f"Модель не ответила за {TIMEOUT} секунд")
     except requests.exceptions.HTTPError:
         raise HTTPException(status_code=502, detail=f"Ошибка от Ollama: {response.text}")
+
     return response
 
 
